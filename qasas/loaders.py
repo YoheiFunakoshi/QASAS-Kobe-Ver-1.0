@@ -212,7 +212,11 @@ def _extract_rg_metadata(rows: list[tuple[object, ...]]) -> dict[str, str]:
 def load_rg(path: str | Path, status_callback: StatusCallback = None) -> SampleData:
     source = Path(path)
     _status(status_callback, "RG様式のBack_data全件領域を読み込んでいます…")
-    workbook = load_workbook(source, read_only=True, data_only=True)
+    # RG reports can contain tens of thousands of Back_data rows while their
+    # cached worksheet dimension says only A1:BD212.  openpyxl's read-only
+    # mode trusts that stale dimension and silently truncates the repertoire.
+    # Normal mode determines the range from the actual cells.
+    workbook = load_workbook(source, read_only=False, data_only=True)
     try:
         sheet_name = next(
             (name for name in workbook.sheetnames if _header_key(name) == _header_key("Back_data")),
@@ -254,12 +258,19 @@ def load_rg(path: str | Path, status_callback: StatusCallback = None) -> SampleD
     metadata["Out-of-frame rows excluded"] = str(out_of_frame_rows)
     listed_reads = sum(item[3] for item in raw_clones)
     in_frame_denominator = parse_positive_int(metadata.get("In-frame reads"))
+    if in_frame_denominator > 0 and listed_reads < in_frame_denominator * 0.95:
+        raise ValueError(
+            "RGのBack_dataが途中までしか読み込まれていません。"
+            f"列挙リード {listed_reads:,} / In frame総リード {in_frame_denominator:,}。"
+            "元のRG Excelが全件を含むか確認してください。"
+        )
     if in_frame_denominator >= listed_reads and in_frame_denominator > 0:
         metadata["Frequency denominator"] = f"In-frame reads: {in_frame_denominator}"
     else:
         in_frame_denominator = listed_reads
         metadata["Frequency denominator"] = f"Listed in-frame reads: {listed_reads}"
     metadata["Reads represented by listed clones"] = str(listed_reads)
+    metadata["Listed in-frame rows"] = str(len(raw_clones))
     return _build_sample_data(
         path=source,
         input_format="RG",

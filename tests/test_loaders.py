@@ -1,8 +1,10 @@
 import csv
 from pathlib import Path
+import re
 import unittest
+from zipfile import ZIP_DEFLATED, ZipFile
 
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 from qasas.loaders import detect_sample_format, load_cpm, load_database, load_rg
 from tests.support import test_path
@@ -56,6 +58,53 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(sample.listed_reads, 12)
         self.assertEqual(sample.source_rows, 3)
         self.assertEqual(sample.skipped_rows, 1)
+
+    def test_rg_loader_does_not_trust_truncated_worksheet_dimension(self):
+        path = test_path("rg_truncated_dimension.xlsx")
+        repacked = test_path("rg_truncated_dimension_repacked.xlsx")
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Back_data"
+        sheet["A1"] = "3:Sample ID"
+        sheet["C1"] = "RG-DIMENSION"
+        sheet["B2"] = "In frame"
+        sheet["C2"] = 12
+        sheet.cell(10, 7, "IGHV3-23*01")
+        sheet.cell(10, 11, "IGHJ4*02")
+        sheet.cell(10, 15, "CARDRW")
+        sheet.cell(10, 16, "in-frame")
+        sheet.cell(10, 17, 7)
+        sheet.cell(300, 7, "IGHV1-2*01")
+        sheet.cell(300, 11, "IGHJ6*01")
+        sheet.cell(300, 15, "CQQQW")
+        sheet.cell(300, 16, "in-frame")
+        sheet.cell(300, 17, 5)
+        workbook.save(path)
+
+        with ZipFile(path, "r") as source, ZipFile(repacked, "w", ZIP_DEFLATED) as destination:
+            for member in source.infolist():
+                payload = source.read(member.filename)
+                if member.filename == "xl/worksheets/sheet1.xml":
+                    payload = re.sub(
+                        br'<dimension ref="[^"]+"',
+                        b'<dimension ref="A1:Q10"',
+                        payload,
+                        count=1,
+                    )
+                destination.writestr(member, payload)
+        repacked.replace(path)
+
+        read_only_workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            self.assertEqual(read_only_workbook["Back_data"].max_row, 10)
+        finally:
+            read_only_workbook.close()
+
+        sample = load_rg(path)
+        self.assertEqual(sample.source_rows, 2)
+        self.assertEqual(len(sample.clones), 2)
+        self.assertEqual(sample.listed_reads, 12)
+        self.assertEqual(sample.total_reads, 12)
 
     def test_database_loader_deduplicates_v_j_cdr3_and_merges_annotations(self):
         path = test_path("database.csv")
