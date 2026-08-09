@@ -7,6 +7,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 from openpyxl import Workbook, load_workbook
 
 from qasas.loaders import detect_sample_format, load_cpm, load_database, load_rg
+from qasas.modes import MatchingMode
 from tests.support import test_path
 
 
@@ -106,6 +107,29 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(sample.listed_reads, 12)
         self.assertEqual(sample.total_reads, 12)
 
+    def test_legacy_rg_frequency_uses_listed_reads(self):
+        path = test_path("rg_denominator.xlsx")
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.title = "Back_data"
+        sheet["A1"] = "Sample ID"
+        sheet["C1"] = "RG-DENOMINATOR"
+        sheet["A2"] = "In-frame reads"
+        sheet["C2"] = 100
+        sheet.cell(10, 7, "IGHV3-23*01")
+        sheet.cell(10, 11, "IGHJ4*02")
+        sheet.cell(10, 15, "CARDRW")
+        sheet.cell(10, 16, "in-frame")
+        sheet.cell(10, 17, 95)
+        workbook.save(path)
+
+        legacy = load_rg(path, matching_mode=MatchingMode.LEGACY)
+        kobe = load_rg(path, matching_mode=MatchingMode.KOBE)
+        self.assertEqual(legacy.listed_reads, 95)
+        self.assertEqual(legacy.total_reads, 95)
+        self.assertEqual(kobe.listed_reads, 95)
+        self.assertEqual(kobe.total_reads, 100)
+
     def test_database_loader_deduplicates_v_j_cdr3_and_merges_annotations(self):
         path = test_path("database.csv")
         with path.open("w", encoding="utf-8-sig", newline="") as handle:
@@ -124,6 +148,84 @@ class LoaderTests(unittest.TestCase):
         self.assertEqual(database.usable_rows, 2)
         self.assertEqual(len(database.entries), 1)
         self.assertEqual(database.entries[0].annotations["Name"], ("Ab1", "Ab2"))
+
+    def test_cdr3_only_aggregates_same_cdr3_across_vj_calls(self):
+        path = test_path("cdr3_only_sample.csv")
+        with path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["Vseg", "Jseg", "CDR3", "Counts"])
+            writer.writeheader()
+            writer.writerow({"Vseg": "IGHV1-2*01", "Jseg": "IGHJ4*01", "CDR3": "CARDRW", "Counts": 3})
+            writer.writerow({"Vseg": "IGHV3-23*01", "Jseg": "IGHJ6*01", "CDR3": "CARDRW", "Counts": 7})
+        sample = load_cpm(path, matching_mode=MatchingMode.CDR3_ONLY)
+        self.assertEqual(len(sample.clones), 1)
+        self.assertEqual(sample.clones[0].reads, 10)
+        self.assertEqual(sample.clones[0].cdr3_aa, "ARDR")
+        self.assertEqual(sample.clones[0].v_genes, ("IGHV1-2", "IGHV3-23"))
+
+    def test_legacy_loader_preserves_gene_text_and_applies_cov_abdab_rules(self):
+        sample_path = test_path("legacy_sample.csv")
+        with sample_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=["Vseg", "Jseg", "CDR3", "Counts"])
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "Vseg": "IGHV1-2*01 // IGHV1-3*01",
+                    "Jseg": "IGHJ4*02",
+                    "CDR3": "CABCDEW",
+                    "Counts": 5,
+                }
+            )
+        sample = load_cpm(sample_path, matching_mode=MatchingMode.LEGACY)
+        self.assertEqual(sample.clones[0].v_genes, ("IGHV1-2*01 // IGHV1-3*01",))
+        self.assertEqual(sample.clones[0].j_genes, ("IGHJ4*02",))
+        self.assertEqual(sample.clones[0].cdr3_aa, "CABCDEW")
+
+        database_path = test_path("legacy_database.csv")
+        fieldnames = [
+            "Name",
+            "Heavy V Gene",
+            "Heavy J Gene",
+            "CDRH3",
+            "Binds to",
+            "Doesn't Bind to",
+            "Neutralising Vs",
+            "Not Neutralising Vs",
+        ]
+        with database_path.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerow(
+                {
+                    "Name": "HumanBound",
+                    "Heavy V Gene": "IGHV1-2*01 (Human)",
+                    "Heavy J Gene": "IGHJ4*02 (Human)",
+                    "CDRH3": "ABCDE",
+                    "Binds to": "WT",
+                }
+            )
+            writer.writerow(
+                {
+                    "Name": "MouseBound",
+                    "Heavy V Gene": "IGHV1-2*01 (Mouse)",
+                    "Heavy J Gene": "IGHJ4*02 (Mouse)",
+                    "CDRH3": "ABCDE",
+                    "Binds to": "WT",
+                }
+            )
+            writer.writerow(
+                {
+                    "Name": "HumanUnannotated",
+                    "Heavy V Gene": "IGHV1-2*01 (Human)",
+                    "Heavy J Gene": "IGHJ4*02 (Human)",
+                    "CDRH3": "ABCDE",
+                }
+            )
+        database = load_database(database_path, matching_mode=MatchingMode.LEGACY)
+        self.assertEqual(database.usable_rows, 1)
+        self.assertEqual(len(database.entries), 1)
+        self.assertEqual(database.entries[0].v_gene, "IGHV1-2*01")
+        self.assertEqual(database.entries[0].j_gene, "IGHJ4*02")
+        self.assertEqual(database.entries[0].cdr3_aa, "CABCDEW")
 
 
 if __name__ == "__main__":

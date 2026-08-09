@@ -15,4 +15,5 @@ QASAS 論文集/
 # Generated result files.
 QASAS 結果/
 results/
+validation/
 *.tmp.xlsx

@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
+from .modes import MatchingMode, mode_specification
+
 
 @dataclass(frozen=True, slots=True)
 class SampleClone:
@@ -39,6 +41,7 @@ class SampleData:
     accepted_rows: int
     skipped_rows: int
     metadata: Mapping[str, str] = field(default_factory=dict)
+    matching_mode: MatchingMode = MatchingMode.KOBE
 
     @property
     def listed_reads(self) -> int:
@@ -72,6 +75,8 @@ class DatabaseData:
     v_column: str
     j_column: str
     cdr3_column: str
+    matching_mode: MatchingMode = MatchingMode.KOBE
+    metadata: Mapping[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +84,7 @@ class MatchRecord:
     clone: SampleClone
     distance: int
     database_entries: tuple[DatabaseEntry, ...]
+    entry_distances: tuple[int, ...] = ()
 
     def combined_annotation(self, column: str) -> str:
         values: list[str] = []
@@ -110,3 +116,11 @@ class AnalysisResult:
     @property
     def matched_clone_count(self) -> int:
         return len(self.matches)
+
+    @property
+    def matching_mode(self) -> MatchingMode:
+        return self.sample.matching_mode
+
+    @property
+    def matching_mode_label(self) -> str:
+        return mode_specification(self.matching_mode).label

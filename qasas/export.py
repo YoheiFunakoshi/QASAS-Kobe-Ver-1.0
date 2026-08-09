@@ -9,6 +9,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from .models import AnalysisResult
+from .modes import ALGORITHM_VERSION, mode_specification
 
 
 _HEADER_FILL = PatternFill("solid", fgColor="17365D")
@@ -53,6 +54,7 @@ def _annotation_order(result: AnalysisResult) -> list[str]:
 def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
+    spec = mode_specification(result.matching_mode)
     workbook = Workbook()
     summary = workbook.active
     summary.title = "Summary"
@@ -61,6 +63,9 @@ def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
     summary["A1"].font = Font(size=16, bold=True, color="17365D")
     info_rows = [
         ("Analysis date", datetime.now().astimezone().isoformat(timespec="seconds")),
+        ("Algorithm version", ALGORITHM_VERSION),
+        ("Matching mode code", result.matching_mode.value),
+        ("Matching mode", spec.label),
         ("Sample ID", result.sample.sample_id),
         ("Input format", result.sample.input_format),
         ("Repertoire file", str(result.sample.source_path)),
@@ -70,7 +75,7 @@ def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
         ("Sample frequency denominator reads", result.sample.total_reads),
         ("Database source rows", result.database.source_rows),
         ("Database usable rows", result.database.usable_rows),
-        ("Database unique V/J/CDR3 keys", len(result.database.entries)),
+        ("Database unique matching keys", len(result.database.entries)),
     ]
     for row_number, (label, value) in enumerate(info_rows, start=3):
         summary.cell(row=row_number, column=1, value=label).font = Font(bold=True)
@@ -128,6 +133,30 @@ def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
     chart.width = 12
     summary.add_chart(chart, "F3")
 
+    method = workbook.create_sheet("Method")
+    method.append(["Item", "Fixed rule for this result"])
+    _style_header(method, 1, 1, 2)
+    method_rows = [
+        ("Algorithm version", ALGORITHM_VERSION),
+        ("Matching mode code", result.matching_mode.value),
+        ("Matching mode", spec.label),
+        ("Purpose", spec.description),
+        ("Sample clone key", spec.sample_clone_key),
+        ("Sample gene handling", spec.sample_gene_handling),
+        ("Database key", spec.database_key),
+        ("Candidate selection", spec.candidate_rule),
+        ("CDR3 handling", spec.cdr3_handling),
+        ("Database candidate retention", spec.candidate_retention),
+        ("Frequency denominator", spec.frequency_rule),
+        ("Distance function", "Levenshtein distance; insertion, deletion, substitution cost = 1"),
+        ("Distance classes", "Exact LV0/LV1/LV2 and cumulative ≤LV0/≤LV1/≤LV2"),
+        ("Maximum distance", len(result.exact_summaries) - 1),
+        ("Reproducibility warning", "Results from different matching modes must not be pooled as the same method."),
+    ]
+    for row in method_rows:
+        method.append(row)
+    method.freeze_panes = "A2"
+
     qc = workbook.create_sheet("Input QC")
     qc.append(["Item", "Value"])
     _style_header(qc, 1, 1, 2)
@@ -147,6 +176,7 @@ def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
         ("Database CDR3 column", result.database.cdr3_column),
     ]
     qc_rows.extend((f"RG metadata: {key}", value) for key, value in result.sample.metadata.items())
+    qc_rows.extend((f"Database metadata: {key}", value) for key, value in result.database.metadata.items())
     for row in qc_rows:
         qc.append(row)
 
@@ -154,6 +184,7 @@ def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
     annotations = _annotation_order(result)
     headers = [
         "Distance",
+        "Matching mode",
         "IGHV normalized",
         "IGHJ normalized",
         "CDR3 normalized",
@@ -163,13 +194,15 @@ def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
         "Reads",
         "Frequency (%)",
         "Source rows aggregated",
-        "Database keys at best distance",
+        "Database entries retained",
+        "Database distances retained",
     ] + annotations
     matched.append(headers)
     _style_header(matched, 1, 1, len(headers))
     for match in result.matches:
         row = [
             f"LV{match.distance}",
+            spec.label,
             match.clone.display_v_gene,
             match.clone.display_j_gene,
             match.clone.cdr3_aa,
@@ -180,14 +213,16 @@ def export_result_xlsx(result: AnalysisResult, path: str | Path) -> Path:
             match.clone.frequency_percent,
             match.clone.source_rows,
             len(match.database_entries),
+            " | ".join(f"LV{distance}" for distance in match.entry_distances),
         ]
         row.extend(match.combined_annotation(column) for column in annotations)
         matched.append(row)
-        matched.cell(matched.max_row, 9).number_format = "0.000000000"
+        matched.cell(matched.max_row, 10).number_format = "0.000000000"
 
     matched.freeze_panes = "A2"
     matched.auto_filter.ref = matched.dimensions
     summary.freeze_panes = "A3"
+    _autosize(method)
     qc.freeze_panes = "A2"
     _autosize(summary)
     _autosize(qc)

@@ -17,6 +17,7 @@ from .engine import analyse
 from .export import export_result_xlsx
 from .loaders import load_database, load_sample
 from .models import AnalysisResult
+from .modes import GUI_MODE_LABELS, MatchingMode, mode_specification, parse_matching_mode
 
 
 APP_TITLE = "QASAS Kobe Ver 1.0"
@@ -45,6 +46,9 @@ class QASASApplication:
         self.sample_path = tk.StringVar()
         self.database_path = tk.StringVar()
         self.input_format = tk.StringVar(value="自動判定")
+        default_mode = mode_specification(MatchingMode.KOBE)
+        self.matching_mode = tk.StringVar(value=default_mode.label)
+        self.mode_description = tk.StringVar(value=default_mode.description)
         self.status_text = tk.StringVar(value="検体ファイルとデータベースを選択してください。")
         self.sample_summary = tk.StringVar(value="未解析")
         self.database_summary = tk.StringVar(value="未解析")
@@ -76,7 +80,7 @@ class QASASApplication:
         ttk.Label(header, text=APP_TITLE, style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
-            text="IGHV・IGHJ一致条件下でCDR3アミノ酸配列をLV0／LV1／LV2照合（単一検体版）",
+            text="旧QASAS／Kobe Ver 1.0／CDR3のみを選択してLV0・LV1・LV2照合（単一検体版）",
             style="Subtitle.TLabel",
         ).pack(anchor="w")
 
@@ -100,11 +104,30 @@ class QASASApplication:
         )
         self.format_box.grid(row=1, column=1, sticky="w", pady=4)
 
-        ttk.Label(input_frame, text="抗体DB (CSV)").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        ttk.Label(input_frame, text="照合方式").grid(row=2, column=0, sticky="w", padx=(0, 8), pady=4)
+        mode_frame = ttk.Frame(input_frame)
+        mode_frame.grid(row=2, column=1, sticky="ew", pady=4)
+        self.mode_box = ttk.Combobox(
+            mode_frame,
+            textvariable=self.matching_mode,
+            values=GUI_MODE_LABELS,
+            state="readonly",
+            width=36,
+        )
+        self.mode_box.pack(side="left")
+        self.mode_box.bind("<<ComboboxSelected>>", self._on_mode_changed)
+        ttk.Label(
+            mode_frame,
+            textvariable=self.mode_description,
+            style="Subtitle.TLabel",
+            wraplength=620,
+        ).pack(side="left", padx=(10, 0))
+
+        ttk.Label(input_frame, text="抗体DB (CSV)").grid(row=3, column=0, sticky="w", padx=(0, 8), pady=4)
         self.database_entry = ttk.Entry(input_frame, textvariable=self.database_path)
-        self.database_entry.grid(row=2, column=1, sticky="ew", pady=4)
+        self.database_entry.grid(row=3, column=1, sticky="ew", pady=4)
         self.database_button = ttk.Button(input_frame, text="参照…", command=self._browse_database)
-        self.database_button.grid(row=2, column=2, padx=(8, 0), pady=4)
+        self.database_button.grid(row=3, column=2, padx=(8, 0), pady=4)
 
         action_frame = ttk.Frame(outer)
         action_frame.pack(fill="x", pady=10)
@@ -112,7 +135,7 @@ class QASASApplication:
         self.run_button.pack(side="left")
         self.save_button = ttk.Button(action_frame, text="結果をExcel保存…", command=self._save_result, state="disabled")
         self.save_button.pack(side="left", padx=(8, 0))
-        ttk.Label(action_frame, text="※ 時系列統合は次期拡張で対応", style="Subtitle.TLabel").pack(side="right")
+        ttk.Label(action_frame, text="※ 照合方式は画面・ログ・Excelへ記録されます", style="Subtitle.TLabel").pack(side="right")
 
         cards = ttk.Frame(outer)
         cards.pack(fill="x", pady=(0, 10))
@@ -120,7 +143,7 @@ class QASASApplication:
             (
                 ("検体", self.sample_summary),
                 ("データベース", self.database_summary),
-                ("LV0〜LV2一致", self.match_summary),
+                ("選択方式のLV0〜LV2一致", self.match_summary),
             )
         ):
             cards.columnconfigure(column, weight=1)
@@ -256,11 +279,17 @@ class QASASApplication:
         if selected:
             self.database_path.set(selected)
 
+    def _on_mode_changed(self, _event: object | None = None) -> None:
+        spec = mode_specification(self.matching_mode.get())
+        self.mode_description.set(spec.description)
+        self.status_text.set(f"照合方式: {spec.label}")
+
     def _set_busy(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
         for widget in (self.run_button, self.sample_button, self.database_button, self.sample_entry, self.database_entry):
             widget.configure(state=state)
         self.format_box.configure(state="disabled" if busy else "readonly")
+        self.mode_box.configure(state="disabled" if busy else "readonly")
         if busy:
             self.save_button.configure(state="disabled")
             self.progress.configure(mode="indeterminate")
@@ -289,25 +318,41 @@ class QASASApplication:
         self._append_log(f"検体: {sample}")
         self._append_log(f"DB  : {database}")
         input_format = self.input_format.get()
+        matching_mode = parse_matching_mode(self.matching_mode.get())
+        self._append_log(f"方式: {mode_specification(matching_mode).label} [{matching_mode.value}]")
         self.worker = threading.Thread(
             target=self._analysis_worker,
-            args=(sample, database, input_format),
+            args=(sample, database, input_format, matching_mode),
             daemon=True,
             name="QASAS-analysis",
         )
         self.worker.start()
 
-    def _analysis_worker(self, sample_path: Path, database_path: Path, input_format: str) -> None:
+    def _analysis_worker(
+        self,
+        sample_path: Path,
+        database_path: Path,
+        input_format: str,
+        matching_mode: MatchingMode,
+    ) -> None:
         try:
             status = lambda text: self.events.put(("status", text))
-            sample = load_sample(sample_path, input_format, status)
-            database = load_database(database_path, status)
-            self.events.put(("status", "IGHV・IGHJ別にCDR3距離を照合しています…"))
+            sample = load_sample(
+                sample_path,
+                input_format,
+                status,
+                matching_mode=matching_mode,
+            )
+            database = load_database(database_path, status, matching_mode=matching_mode)
+            self.events.put(
+                ("status", f"{mode_specification(matching_mode).short_label}方式でCDR3距離を照合しています…")
+            )
             result = analyse(
                 sample,
                 database,
                 max_distance=2,
                 progress_callback=lambda done, total: self.events.put(("progress", (done, total))),
+                matching_mode=matching_mode,
             )
             self.events.put(("done", result))
         except Exception as exc:
@@ -363,6 +408,7 @@ class QASASApplication:
             f"{len(result.database.entries):,} unique keys / {result.database.usable_rows:,} usable rows"
         )
         self.match_summary.set(
+            f"{mode_specification(result.matching_mode).short_label} | "
             f"{len(result.matches):,} clones / {sum(match.clone.reads for match in result.matches):,} reads"
         )
         for item in result.exact_summaries:
@@ -394,6 +440,7 @@ class QASASApplication:
                 ),
             )
         self._draw_chart(result)
+        self._append_log(f"照合方式: {result.matching_mode_label} [{result.matching_mode.value}]")
         for item in result.exact_summaries:
             self._append_log(
                 f"{item.label}: unique={item.unique_clones:,}, reads={item.total_reads:,}, frequency={item.frequency_percent:.9f}%"
@@ -402,7 +449,7 @@ class QASASApplication:
     def _draw_empty_chart(self) -> None:
         self.figure.clear()
         axis = self.figure.add_subplot(111)
-        axis.text(0.5, 0.5, "解析後にLV0・LV1・LV2を表示します", ha="center", va="center", color="#6B7785")
+        axis.text(0.5, 0.5, "方式を選択して解析するとLV0・LV1・LV2を表示します", ha="center", va="center", color="#6B7785")
         axis.set_axis_off()
         self.figure.tight_layout()
         self.chart_canvas.draw_idle()
@@ -443,7 +490,8 @@ class QASASApplication:
         output_dir = self.app_dir / "QASAS 結果"
         output_dir.mkdir(parents=True, exist_ok=True)
         safe_sample = re.sub(r"[^A-Za-z0-9_.-]+", "_", self.result.sample.sample_id).strip("_") or "sample"
-        default_name = f"QASAS_{safe_sample}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+        mode_code = self.result.matching_mode.value.replace("-", "_")
+        default_name = f"QASAS_{safe_sample}_{mode_code}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
         selected = filedialog.asksaveasfilename(
             title="QASAS結果を保存",
             initialdir=output_dir,
