@@ -11,6 +11,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
+from matplotlib import font_manager, rcParams
 
 from .engine import analyse
 from .export import export_result_xlsx
@@ -21,8 +22,17 @@ from .models import AnalysisResult
 APP_TITLE = "QASAS Kobe Ver 1.0"
 
 
+def _configure_matplotlib_japanese_font() -> None:
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for candidate in ("Yu Gothic", "Meiryo", "MS Gothic"):
+        if candidate in available:
+            rcParams["font.family"] = candidate
+            return
+
+
 class QASASApplication:
     def __init__(self, root: tk.Tk) -> None:
+        _configure_matplotlib_japanese_font()
         self.root = root
         self.root.title(APP_TITLE)
         self.root.geometry("1220x800")
